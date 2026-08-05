@@ -4,6 +4,7 @@ let units = [];          // 分线器列表
 let ports = { real: [], virt: [], pairs: [] };
 let sources = [];        // 源串口下拉选项
 let manualPairs = [];    // 可选端口对
+let creating = new Set(); // 正在创建端口对的分线器 id
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -26,9 +27,19 @@ async function refreshPorts() {
     ports = await api("/api/ports");
     sources = [...ports.real, ...ports.virt];
     manualPairs = ports.pairs;
+    updatePortStat();
     renderUnits();
   } catch (e) {
     console.error("刷新端口失败", e);
+  }
+}
+
+function updatePortStat() {
+  const el = $("#portStat");
+  if (el) {
+    const real = ports.real.length;
+    const pairs = ports.pairs.length;
+    el.innerHTML = `真实串口 <b>${real}</b> · 虚拟端口对 <b>${pairs}</b>`;
   }
 }
 
@@ -37,9 +48,15 @@ function renderUnits() {
   const wrap = $("#units");
   wrap.innerHTML = "";
   if (units.length === 0) {
-    wrap.innerHTML = '<div class="empty">还没有分线器，点左上角「＋ 新建分线器」</div>';
+    wrap.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔌</div>
+        <div class="empty-text">还没有分线器</div>
+        <div class="empty-sub">点击左上角「＋ 新建分线器」开始</div>
+      </div>`;
+  } else {
+    units.forEach((u) => wrap.appendChild(unitCard(u)));
   }
-  units.forEach((u) => wrap.appendChild(unitCard(u)));
 
   const running = units.filter((u) => u.running).length;
   const gs = $("#globalStatus");
@@ -56,6 +73,8 @@ function unitCard(u) {
   const card = document.createElement("div");
   card.className = "unit" + (u.running ? " running" : "");
   card.dataset.id = u.id;
+  if (!u.pairs) u.pairs = [];
+  if (!u.startedAt) u.startedAt = 0;
 
   // 头部
   const head = document.createElement("div");
@@ -63,11 +82,25 @@ function unitCard(u) {
   const title = document.createElement("span");
   title.className = "unit-title";
   title.textContent = `分线器 ${u.id}`;
+  head.appendChild(title);
+
+  const badge = document.createElement("span");
+  badge.className = "unit-badge" + (u.running ? " on" : "");
+  badge.textContent = u.running ? "● 运行中" : "○ 未启动";
+  head.appendChild(badge);
+
   const state = document.createElement("span");
   state.className = "unit-state " + (u.running ? "running" : "stopped");
-  state.textContent = u.running ? `● 运行中  ${u.source} @ ${u.baud}` : "○ 未启动";
-  head.appendChild(title);
+  state.textContent = u.running ? `${u.source} @ ${u.baud}` : "";
   head.appendChild(state);
+
+  if (u.running && u.startedAt) {
+    const t = document.createElement("span");
+    t.className = "unit-time";
+    t.textContent = `已运行 ${fmtDuration(Date.now() - u.startedAt)}`;
+    t.dataset.role = "uptime";
+    head.appendChild(t);
+  }
   card.appendChild(head);
 
   // 配置行
@@ -86,7 +119,6 @@ function unitCard(u) {
     sel.appendChild(opt);
   });
   if (!u.source && sources.length > 0) {
-    // 默认选真实串口
     const real = ports.real.find((x) => x.includes("COM143")) || ports.real[0];
     if (real) sel.value = real;
   }
@@ -112,11 +144,16 @@ function unitCard(u) {
   // 端口对列表
   const list = document.createElement("div");
   list.className = "pair-list";
-  if (u.pairs.length === 0) {
+  if (u.pairs.length === 0 && !creating.has(u.id)) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "（无终端端口，点下方按钮添加）";
+    empty.textContent = "（暂无终端端口，点下方按钮添加）";
     list.appendChild(empty);
+  } else if (creating.has(u.id)) {
+    const loading = document.createElement("div");
+    loading.className = "loading-row";
+    loading.innerHTML = `<div class="spinner"></div> 正在创建虚拟端口对…`;
+    list.appendChild(loading);
   } else {
     u.pairs.forEach((p, i) => {
       const row = document.createElement("div");
@@ -124,11 +161,13 @@ function unitCard(u) {
       row.innerHTML = `
         <span class="term">终端 ${i + 1}</span>
         <span class="conn">请连 ${p.terminal}</span>
+        <span class="hint">SecureCRT / MobaXterm</span>
       `;
       if (!u.running) {
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "✕";
+        del.title = "移除该终端端口";
         del.onclick = () => delPair(u.id, p.terminal);
         row.appendChild(del);
       }
@@ -145,36 +184,54 @@ function unitCard(u) {
     const stop = document.createElement("button");
     stop.className = "btn danger";
     stop.textContent = "■ 停止";
+    stop.title = "停止该分线器";
     stop.onclick = () => stopUnit(u.id);
     btns.appendChild(stop);
   } else {
     const addPair = document.createElement("button");
     addPair.className = "btn";
     addPair.textContent = "＋ 新建端口对";
+    addPair.title = "自动创建一对虚拟串口并接管";
+    addPair.disabled = creating.has(u.id);
     addPair.onclick = () => newPair(u.id);
     btns.appendChild(addPair);
 
     const addManual = document.createElement("button");
     addManual.className = "btn";
     addManual.textContent = "＋ 选已有端口";
+    addManual.title = "从已有虚拟端口对中选择";
+    addManual.disabled = creating.has(u.id);
     addManual.onclick = () => manualPair(u.id);
     btns.appendChild(addManual);
 
     const start = document.createElement("button");
     start.className = "btn primary";
     start.textContent = "▶ 启动";
+    start.title = "开始双向转发";
+    start.disabled = creating.has(u.id) || u.pairs.length === 0;
     start.onclick = () => startUnit(u.id);
     btns.appendChild(start);
 
     const del = document.createElement("button");
-    del.className = "btn danger";
+    del.className = "btn danger ghost";
     del.textContent = "删除";
+    del.title = "删除此分线器";
     del.onclick = () => delUnit(u.id);
     btns.appendChild(del);
   }
   card.appendChild(btns);
 
   return card;
+}
+
+// 运行时长格式化
+function fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分 ${s % 60} 秒`;
+  const h = Math.floor(m / 60);
+  return `${h} 时 ${m % 60} 分`;
 }
 
 // ---- 单元操作 ----
@@ -187,6 +244,9 @@ async function startUnit(id) {
       method: "POST",
       body: JSON.stringify({ source: sel.value, baud: parseInt(baud.value) }),
     });
+    // 记录启动时间
+    const u = units.find((x) => x.id === id);
+    if (u) u.startedAt = Date.now();
     await refreshUnits();
   } catch (e) {
     alert("启动失败：\n" + e.message);
@@ -195,25 +255,35 @@ async function startUnit(id) {
 
 async function stopUnit(id) {
   await api(`/api/units/${id}/stop`, { method: "POST" });
+  const u = units.find((x) => x.id === id);
+  if (u) { u.startedAt = 0; u.running = false; }
   await refreshUnits();
 }
 
 async function newPair(id) {
-  const before = units.find((u) => u.id === id)?.pairs?.length || 0;
+  const before = (units.find((u) => u.id === id)?.pairs || []).length;
+  creating.add(id);
+  renderUnits();
   try {
     await api(`/api/units/${id}/addpair`, { method: "POST" });
-    // 异步创建，轮询等待端口对出现（最多 30 秒）
-    for (let i = 0; i < 60; i++) {
+    // 异步创建，轮询等待端口对出现（最多 40 秒）
+    for (let i = 0; i < 80; i++) {
       await new Promise((res) => setTimeout(res, 500));
       const u = units.find((x) => x.id === id);
       if (u && u.pairs && u.pairs.length > before) {
         const added = u.pairs[u.pairs.length - 1];
+        creating.delete(id);
+        renderUnits();
         alert(`已新建端口对：\n终端连接端 ${added.terminal}（SecureCRT 连这个）\n分线器接管端 ${added.takeover}`);
         return;
       }
     }
-    alert("新建端口对超时，请查看状态或重新扫描。");
+    creating.delete(id);
+    renderUnits();
+    alert("新建端口对超时，请重新扫描端口后查看。");
   } catch (e) {
+    creating.delete(id);
+    renderUnits();
     alert("新建端口对失败：\n" + e.message);
   }
 }
@@ -231,15 +301,14 @@ async function manualPair(id) {
     opt.textContent = o;
     sel.appendChild(opt);
   });
-  // 简单弹窗
   const modal = document.createElement("div");
-  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100`;
+  modal.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(2px)`;
   const box = document.createElement("div");
-  box.style.cssText = `background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;min-width:360px`;
-  box.innerHTML = `<h3 style="margin-bottom:12px">选择接管端口</h3>`;
+  box.style.cssText = `background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:22px;min-width:380px;box-shadow:var(--shadow)`;
+  box.innerHTML = `<h3 style="margin-bottom:14px;font-size:15px">选择接管端口</h3>`;
   box.appendChild(sel);
   const btns = document.createElement("div");
-  btns.style.cssText = "margin-top:16px;display:flex;gap:10px;justify-content:flex-end";
+  btns.style.cssText = "margin-top:18px;display:flex;gap:10px;justify-content:flex-end";
   const ok = document.createElement("button");
   ok.className = "btn primary";
   ok.textContent = "确定";
@@ -257,26 +326,39 @@ async function manualPair(id) {
     const idx = parseInt(sel.value);
     const p = manualPairs[idx];
     modal.remove();
-    await api(`/api/units/${id}/addmanual`, {
-      method: "POST",
-      body: JSON.stringify({ takeover: p.takeover, terminal: p.terminal }),
-    });
-    await refreshUnits();
+    try {
+      await api(`/api/units/${id}/addmanual`, {
+        method: "POST",
+        body: JSON.stringify({ takeover: p.takeover, terminal: p.terminal }),
+      });
+      await refreshUnits();
+    } catch (e) {
+      alert("添加失败：" + e.message);
+    }
   };
 }
 
 async function delPair(id, terminal) {
-  await api(`/api/units/${id}/delpair`, {
-    method: "POST",
-    body: JSON.stringify({ terminal }),
-  });
-  await refreshUnits();
+  if (!confirm(`移除终端端口 ${terminal}？`)) return;
+  try {
+    await api(`/api/units/${id}/delpair`, {
+      method: "POST",
+      body: JSON.stringify({ terminal }),
+    });
+    await refreshUnits();
+  } catch (e) {
+    alert("移除失败：" + e.message);
+  }
 }
 
 async function delUnit(id) {
   if (!confirm("删除此分线器？")) return;
-  await api(`/api/units/${id}`, { method: "DELETE" });
-  await refreshUnits();
+  try {
+    await api(`/api/units/${id}`, { method: "DELETE" });
+    await refreshUnits();
+  } catch (e) {
+    alert("删除失败：" + e.message);
+  }
 }
 
 // ---- 刷新分线器列表 ----
@@ -285,7 +367,6 @@ async function refreshUnits() {
     units = await api("/api/units/all");
     renderUnits();
   } catch (e) {
-    // /api/units/all 可能不存在，用 SSE 兜底
     console.error(e);
   }
 }
@@ -295,23 +376,48 @@ function connectSSE() {
   const es = new EventSource("/api/stream");
   es.onmessage = (ev) => {
     try {
-      units = JSON.parse(ev.data);
+      const next = JSON.parse(ev.data);
+      // 保留前端本地状态（启动时间）
+      next.forEach((nu) => {
+        const old = units.find((x) => x.id === nu.id);
+        if (old && old.startedAt && nu.running) nu.startedAt = old.startedAt;
+        else if (nu.running && !nu.startedAt) nu.startedAt = Date.now();
+        else if (!nu.running) nu.startedAt = 0;
+      });
+      units = next;
       renderUnits();
     } catch (e) {
       console.error("SSE 解析失败", e);
     }
   };
   es.onerror = () => {
-    // 自动重连
     setTimeout(connectSSE, 2000);
   };
 }
 
+// 每秒刷新运行时长显示
+setInterval(() => {
+  document.querySelectorAll('[data-role="uptime"]').forEach((el) => {
+    const card = el.closest(".unit");
+    if (card) {
+      const id = parseInt(card.dataset.id);
+      const u = units.find((x) => x.id === id);
+      if (u && u.running && u.startedAt) {
+        el.textContent = `已运行 ${fmtDuration(Date.now() - u.startedAt)}`;
+      }
+    }
+  });
+}, 1000);
+
 // ---- 初始化 ----
 async function init() {
   $("#btnNew").onclick = async () => {
-    await api("/api/units/new", { method: "POST" });
-    await refreshPorts();
+    try {
+      await api("/api/units/new", { method: "POST" });
+      await refreshUnits();
+    } catch (e) {
+      alert("新建分线器失败：" + e.message);
+    }
   };
   $("#btnRefresh").onclick = refreshPorts;
 

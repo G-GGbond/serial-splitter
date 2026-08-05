@@ -478,32 +478,36 @@ class SplitterConsole:
             messagebox.showerror("未找到 com0com",
                                  "未找到 com0com 驱动。\n请先安装 com0com 后再试。")
             return None, None
-        tmp = tempfile.mkdtemp(prefix="splt_")
-        install = os.path.join(tmp, "install.txt")
-        bat = os.path.join(tmp, "mkpair.bat")
-        content = (
-            "@echo off\r\n"
-            "reg add HKLM\\Software\\Policies\\Microsoft\\Windows\\DeviceInstall\\Settings "
-            "/v SuppressNewHWUI /t REG_DWORD /d 1 /f\r\n"
-            f'"{setupc}" --wait 20 --silent install PortName=COM# PortName=COM# '
-            f'> "{install}" 2>&1\r\n'
-            f'echo INSTALL_EXIT=%ERRORLEVEL% >> "{install}"\r\n'
-            f'"{setupc}" --silent updatefnames >> "{install}" 2>&1\r\n'
-            "reg add HKLM\\Software\\Policies\\Microsoft\\Windows\\DeviceInstall\\Settings "
-            "/v SuppressNewHWUI /t REG_DWORD /d 0 /f\r\n"
-        )
-        with open(bat, "w") as f:
-            f.write(content)
+        if not is_admin():
+            messagebox.showwarning(
+                "需要管理员权限",
+                "请以管理员身份运行本程序（右键 → 以管理员身份运行），\n"
+                "否则无法创建虚拟串口。")
+            return None, None
 
         before = self._com0com_map()
         try:
-            if is_admin():
-                subprocess.run(["cmd.exe", "/c", bat], capture_output=True, timeout=180)
-            else:
-                ps = (f"Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','{bat}' "
-                      f"-Verb RunAs -Wait")
-                subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                               capture_output=True, timeout=180)
+            # 用 CREATE_NO_WINDOW 隐藏命令行窗口，直接调 setupc，不弹 cmd/UAC
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            # setupc 需要以 com0com 安装目录为工作目录（读 com0com.inf）
+            com0dir = os.path.dirname(setupc)
+            # 抑制硬件向导
+            subprocess.run(
+                ["reg", "add", r"HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings",
+                 "/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "1", "/f"],
+                creationflags=flags, capture_output=True, timeout=30)
+            proc = subprocess.Popen(
+                [setupc, "--silent", "install", "PortName=COM#", "PortName=COM#"],
+                cwd=com0dir, creationflags=flags,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.wait(timeout=60)
+            # 更新友好名称
+            subprocess.run([setupc, "--silent", "updatefnames"], cwd=com0dir,
+                           creationflags=flags, capture_output=True, timeout=30)
+            subprocess.run(
+                ["reg", "add", r"HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings",
+                 "/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "0", "/f"],
+                creationflags=flags, capture_output=True, timeout=30)
         except Exception as e:
             messagebox.showerror("错误", f"执行 com0com 失败：{e}")
             return None, None

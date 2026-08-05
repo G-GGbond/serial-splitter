@@ -8,21 +8,35 @@
 </head>
 <body>
 <header>
-  <h1>🔌 串口分线器</h1>
-  <div class="hint">一个源串口分出多个终端 · 双向透明转发</div>
+  <div class="header-left">
+    <h1>🔌 串口分线器</h1>
+    <div class="hint">一个源串口分出多个终端 · 双向透明转发</div>
+  </div>
+  <div class="header-right">
+    <span id="portStat" class="port-stat">扫描端口…</span>
+  </div>
 </header>
 
 <main>
   <div class="toolbar">
-    <button id="btnNew" class="btn primary">＋ 新建分线器</button>
-    <button id="btnRefresh" class="btn">⟳ 刷新端口</button>
+    <button id="btnNew" class="btn primary" title="添加一个新的分线器">＋ 新建分线器</button>
+    <button id="btnRefresh" class="btn" title="重新扫描系统串口">⟳ 刷新端口</button>
     <span id="globalStatus" class="status-dot idle">○ 无运行中的分线器</span>
   </div>
 
-  <div id="units"></div>
+  <div id="units">
+    <div class="empty-state">
+      <div class="empty-icon">🔌</div>
+      <div class="empty-text">还没有分线器</div>
+      <div class="empty-sub">点击左上角「＋ 新建分线器」开始</div>
+    </div>
+  </div>
 </main>
 
-<footer>终端用 SecureCRT / MobaXterm 连接面板中绿色标注的端口</footer>
+<footer>
+  <span>终端用 <b>SecureCRT</b> / <b>MobaXterm</b> 连接面板中 <span class="green-text">绿色</span> 标注的端口</span>
+  <span id="version" class="version">v1.0</span>
+</footer>
 
 <script src="app.js"></script>
 </body>

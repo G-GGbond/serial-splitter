@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +19,11 @@ var setupcPaths = []string{
 
 // isAdmin 检测当前进程是否以管理员权限运行。
 func isAdmin() bool {
+	return IsAdmin()
+}
+
+// IsAdmin 公开检测当前进程是否以管理员权限运行。
+func IsAdmin() bool {
 	err := exec.Command("net", "session").Run()
 	return err == nil
 }
@@ -81,40 +88,38 @@ func CreatePair() (string, string, error) {
 
 	before := Com0comMap()
 
-	tmp, err := os.MkdirTemp("", "splt")
-	if err != nil {
-		return "", "", err
-	}
-	defer os.RemoveAll(tmp)
-	installLog := tmp + "\\install.txt"
-	bat := tmp + "\\mkpair.bat"
-
-	content := "@echo off\r\n" +
-		"reg add HKLM\\Software\\Policies\\Microsoft\\Windows\\DeviceInstall\\Settings /v SuppressNewHWUI /t REG_DWORD /d 1 /f\r\n" +
-		fmt.Sprintf(`"%s" --silent install PortName=COM# PortName=COM# > "%s" 2>&1`, setupc, installLog) + "\r\n" +
-		"echo INSTALL_EXIT=%ERRORLEVEL% >> \"" + installLog + "\"\r\n" +
-		fmt.Sprintf(`"%s" --silent updatefnames >> "%s" 2>&1`, setupc, installLog) + "\r\n" +
-		"reg add HKLM\\Software\\Policies\\Microsoft\\Windows\\DeviceInstall\\Settings /v SuppressNewHWUI /t REG_DWORD /d 0 /f\r\n"
-	if err := os.WriteFile(bat, []byte(content), 0644); err != nil {
-		return "", "", err
+	// 需要管理员权限。若已是管理员直接执行（隐藏窗口）；否则返回错误提示。
+	if !isAdmin() {
+		return "", "", fmt.Errorf("需要管理员权限才能创建虚拟串口。请右键「以管理员身份运行」本程序。")
 	}
 
-	// 需要管理员权限。若已是管理员直接执行；否则用 powershell 提权（会弹 UAC）。
-	if isAdmin() {
-		cmd := exec.Command("cmd.exe", "/c", bat)
-		if err := cmd.Start(); err != nil {
-			return "", "", err
-		}
-		go cmd.Wait()
-	} else {
-		// 非管理员：后台提权执行，不等待（避免阻塞）
-		psCmd := fmt.Sprintf(`Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','%s' -Verb RunAs`, bat)
-		cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
-		if err := cmd.Start(); err != nil {
-			return "", "", err
-		}
-		go cmd.Wait()
+	// 隐藏控制台窗口直接调 setupc（不闪 cmd 黑窗）。
+	// 关键：必须把工作目录设为 com0com 安装目录，setupc 需要读 com0com.inf。
+	dir := filepath.Dir(setupc)
+	hide := &syscall.SysProcAttr{HideWindow: true}
+	cmd := exec.Command(setupc, "--silent", "install", "PortName=COM#", "PortName=COM#")
+	cmd.Dir = dir
+	cmd.SysProcAttr = hide
+	if err := cmd.Start(); err != nil {
+		return "", "", err
 	}
+	go cmd.Wait()
+	// 抑制硬件向导
+	regCmd := exec.Command("reg", "add", `HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings`,
+		"/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "1", "/f")
+	regCmd.SysProcAttr = hide
+	_ = regCmd.Run()
+	go func() {
+		time.Sleep(2 * time.Second)
+		upd := exec.Command(setupc, "--silent", "updatefnames")
+		upd.Dir = dir
+		upd.SysProcAttr = hide
+		_ = upd.Run()
+		regOff := exec.Command("reg", "add", `HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings`,
+			"/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "0", "/f")
+		regOff.SysProcAttr = hide
+		_ = regOff.Run()
+	}()
 
 	// 轮询检测新端口对
 	deadline := time.Now().Add(25 * time.Second)
@@ -138,8 +143,7 @@ func CreatePair() (string, string, error) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	log, _ := os.ReadFile(installLog)
-	return "", "", fmt.Errorf("创建失败：\n%s", string(log))
+	return "", "", fmt.Errorf("创建端口对超时（25秒内未检测到新端口）")
 }
 
 // ListPorts 列出系统所有串口（含描述），用于区分真实串口和 com0com 虚拟串口。

@@ -52,11 +52,15 @@ type App struct {
 func (u *Unit) snapshot() map[string]interface{} {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	pairs := u.Pairs
+	if pairs == nil {
+		pairs = []Pair{}
+	}
 	return map[string]interface{}{
 		"id":      u.ID,
 		"source":  u.Source,
 		"baud":    u.Baud,
-		"pairs":   u.Pairs,
+		"pairs":   pairs,
 		"running": u.Running,
 	}
 }
@@ -184,7 +188,7 @@ func main() {
 	// 新建分线器
 	mux.HandleFunc("/api/units/new", func(w http.ResponseWriter, r *http.Request) {
 		app.mu.Lock()
-		u := &Unit{ID: app.nextID}
+		u := &Unit{ID: app.nextID, Pairs: []Pair{}}
 		app.nextID++
 		app.units = append(app.units, u)
 		app.mu.Unlock()
