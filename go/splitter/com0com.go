@@ -79,6 +79,42 @@ func parseCom0com(desc string) (PortInfo, bool) {
 	return PortInfo{Device: device, Kind: kind, Idx: idx}, true
 }
 
+// setupcList 用 `setupc list` 解析准确的端口对（不依赖 FriendlyName）。
+// 返回 map[(kind,idx)] -> COM 端口名。
+func setupcList() map[[2]interface{}]string {
+	result := map[[2]interface{}]string{}
+	setupc := FindSetupc()
+	if setupc == "" {
+		return result
+	}
+	hide := &syscall.SysProcAttr{HideWindow: true}
+	cmd := exec.Command(setupc, "list")
+	cmd.Dir = filepath.Dir(setupc)
+	cmd.SysProcAttr = hide
+	out, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+	// 格式1: CNCA0 PortName=COM#,RealPortName=COM146
+	// 格式2: CNCA2 PortName=COM150
+	re := regexp.MustCompile(`(CNCA|CNCB)(\d+)\s+PortName=(?:COM#(?:,RealPortName=)?|)(COM\d+)`)
+	for _, line := range strings.Split(string(out), "\n") {
+		m := re.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		kind := m[1]
+		idx := 0
+		fmt.Sscanf(m[2], "%d", &idx)
+		port := m[3]
+		if port == "" {
+			continue
+		}
+		result[[2]interface{}{kind, idx}] = port
+	}
+	return result
+}
+
 // CreatePair 调用 com0com 创建一对端口，返回 (CNCA端口, CNCB端口)。
 func CreatePair() (string, string, error) {
 	setupc := FindSetupc()
@@ -86,7 +122,7 @@ func CreatePair() (string, string, error) {
 		return "", "", fmt.Errorf("未找到 com0com setupc.exe")
 	}
 
-	before := Com0comMap()
+	before := setupcList()
 
 	// 需要管理员权限。若已是管理员直接执行（隐藏窗口）；否则返回错误提示。
 	if !isAdmin() {
@@ -97,53 +133,53 @@ func CreatePair() (string, string, error) {
 	// 关键：必须把工作目录设为 com0com 安装目录，setupc 需要读 com0com.inf。
 	dir := filepath.Dir(setupc)
 	hide := &syscall.SysProcAttr{HideWindow: true}
-	cmd := exec.Command(setupc, "--silent", "install", "PortName=COM#", "PortName=COM#")
-	cmd.Dir = dir
-	cmd.SysProcAttr = hide
-	if err := cmd.Start(); err != nil {
-		return "", "", err
-	}
-	go cmd.Wait()
+
 	// 抑制硬件向导
 	regCmd := exec.Command("reg", "add", `HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings`,
 		"/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "1", "/f")
 	regCmd.SysProcAttr = hide
 	_ = regCmd.Run()
-	go func() {
-		time.Sleep(2 * time.Second)
-		upd := exec.Command(setupc, "--silent", "updatefnames")
-		upd.Dir = dir
-		upd.SysProcAttr = hide
-		_ = upd.Run()
-		regOff := exec.Command("reg", "add", `HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings`,
-			"/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "0", "/f")
-		regOff.SysProcAttr = hide
-		_ = regOff.Run()
-	}()
 
-	// 轮询检测新端口对
-	deadline := time.Now().Add(25 * time.Second)
+	cmd := exec.Command(setupc, "--silent", "install", "PortName=COM#", "PortName=COM#")
+	cmd.Dir = dir
+	cmd.SysProcAttr = hide
+	if err := cmd.Run(); err != nil {
+		return "", "", fmt.Errorf("setupc install 失败: %v", err)
+	}
+
+	// 同步执行 updatefnames，确保 FriendlyName 更新
+	upd := exec.Command(setupc, "--silent", "updatefnames")
+	upd.Dir = dir
+	upd.SysProcAttr = hide
+	_ = upd.Run()
+
+	regOff := exec.Command("reg", "add", `HKLM\Software\Policies\Microsoft\Windows\DeviceInstall\Settings`,
+		"/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "0", "/f")
+	regOff.SysProcAttr = hide
+	_ = regOff.Run()
+
+	// 轮询检测新端口对（用 setupc list 解析，不依赖 FriendlyName）
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		after := Com0comMap()
+		after := setupcList()
 		var aPort, bPort string
-		found := false
-		for name, pi := range after {
-			if _, existed := before[name]; !existed {
-				if pi.Kind == "CNCA" {
-					aPort = pi.Device
+		for key, dev := range after {
+			if _, existed := before[key]; !existed {
+				kind := key[0].(string)
+				if kind == "CNCA" {
+					aPort = dev
 				} else {
-					bPort = pi.Device
+					bPort = dev
 				}
-				found = true
 			}
 		}
-		if found && aPort != "" && bPort != "" {
+		if aPort != "" && bPort != "" {
 			return aPort, bPort, nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	return "", "", fmt.Errorf("创建端口对超时（25秒内未检测到新端口）")
+	return "", "", fmt.Errorf("创建端口对超时（30秒内未检测到新端口）")
 }
 
 // ListPorts 列出系统所有串口（含描述），用于区分真实串口和 com0com 虚拟串口。

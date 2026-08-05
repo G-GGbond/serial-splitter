@@ -463,6 +463,29 @@ class SplitterConsole:
 
     # ---------- 新建 com0com 端口对 ----------
     @staticmethod
+    def _setupc_list_map():
+        """用 setupc list 解析准确的端口对（不依赖 FriendlyName，可靠）。
+        返回 {(CNCA|CNCB, idx): 'COMxxx'}。"""
+        result = {}
+        setupc = find_setupc()
+        if not setupc:
+            return result
+        try:
+            r = subprocess.run([setupc, "list"], cwd=os.path.dirname(setupc),
+                               capture_output=True, timeout=20, text=True)
+            for line in r.stdout.splitlines():
+                # 格式: CNCA0 PortName=COM#,RealPortName=COM146
+                m = re.match(r"\s*(CNCA|CNCB)(\d+)\s+PortName=COM#.*RealPortName=(COM\d+)?", line)
+                if not m:
+                    continue
+                kind, idx, port = m.group(1), int(m.group(2)), m.group(3)
+                if port:
+                    result[(kind, idx)] = port
+        except Exception:
+            pass
+        return result
+
+    @staticmethod
     def _com0com_map():
         """枚举当前所有 com0com 端口：{(CNCA|CNCB, idx): 'COMxxx'}。"""
         result = {}
@@ -485,7 +508,7 @@ class SplitterConsole:
                 "否则无法创建虚拟串口。")
             return None, None
 
-        before = self._com0com_map()
+        before = self._setupc_list_map()
         try:
             # 用 CREATE_NO_WINDOW 隐藏命令行窗口，直接调 setupc，不弹 cmd/UAC
             flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -512,10 +535,10 @@ class SplitterConsole:
             messagebox.showerror("错误", f"执行 com0com 失败：{e}")
             return None, None
 
-        # 轮询检测新端口对（避免时序竞态），最多等 12 秒
-        deadline = time.time() + 12
+        # 轮询检测新端口对（避免时序竞态），最多等 25 秒
+        deadline = time.time() + 25
         while time.time() < deadline:
-            after = self._com0com_map()
+            after = self._setupc_list_map()
             new = {k: v for k, v in after.items() if k not in before}
             a_port = b_port = None
             for (kind, idx), dev in new.items():
