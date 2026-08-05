@@ -32,13 +32,14 @@ type Pair struct {
 
 // Unit 分线器单元
 type Unit struct {
-	mu       sync.Mutex
-	ID       int      `json:"id"`
-	Source   string   `json:"source"`
-	Baud     int      `json:"baud"`
-	Pairs    []Pair   `json:"pairs"`
-	Running  bool     `json:"running"`
-	splitter *splitter.Splitter
+	mu        sync.Mutex
+	ID        int      `json:"id"`
+	Source    string   `json:"source"`
+	Baud      int      `json:"baud"`
+	Pairs     []Pair   `json:"pairs"`
+	Running   bool     `json:"running"`
+	LastError string   `json:"lastError"`
+	splitter  *splitter.Splitter
 }
 
 // App 应用状态
@@ -57,11 +58,12 @@ func (u *Unit) snapshot() map[string]interface{} {
 		pairs = []Pair{}
 	}
 	return map[string]interface{}{
-		"id":      u.ID,
-		"source":  u.Source,
-		"baud":    u.Baud,
-		"pairs":   pairs,
-		"running": u.Running,
+		"id":        u.ID,
+		"source":    u.Source,
+		"baud":      u.Baud,
+		"pairs":     pairs,
+		"running":   u.Running,
+		"lastError": u.LastError,
 	}
 }
 
@@ -401,16 +403,27 @@ func handleAddPair(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 	}
 	u.mu.Unlock()
 
+	// 同步检查管理员权限：非管理员立即返回明确错误，避免前端盲目轮询超时
+	if !splitter.IsAdmin() {
+		http.Error(w, "需要管理员权限才能创建虚拟串口。\n请关闭本程序，右键「以管理员身份运行」启动后重试。", 403)
+		return
+	}
+
 	// 纯异步：立即返回，CreatePair 在后台创建端口对，
 	// 前端通过 SSE 收到状态更新后刷新，或轮询 /api/units/all。
 	go func() {
 		aPort, bPort, err := splitter.CreatePair()
 		if err != nil {
-			log.Printf("新建端口对失败: %v", err)
+			u.mu.Lock()
+			u.LastError = "新建端口对失败: " + err.Error()
+			u.mu.Unlock()
+			log.Printf("分线器 %d 新建端口对失败: %v", u.ID, err)
+			app.broadcast()
 			return
 		}
 		u.mu.Lock()
 		u.Pairs = append(u.Pairs, Pair{Takeover: bPort, Terminal: aPort})
+		u.LastError = ""
 		u.mu.Unlock()
 		app.broadcast()
 	}()

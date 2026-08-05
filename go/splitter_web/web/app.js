@@ -141,6 +141,14 @@ function unitCard(u) {
   }
   card.appendChild(config);
 
+  // 错误提示
+  if (u.lastError && !u.running) {
+    const err = document.createElement("div");
+    err.style.cssText = "color:var(--red);font-size:12.5px;background:var(--red-soft);border:1px solid var(--red);border-radius:6px;padding:8px 12px;margin-bottom:10px";
+    err.textContent = "⚠ " + u.lastError;
+    card.appendChild(err);
+  }
+
   // 端口对列表
   const list = document.createElement("div");
   list.className = "pair-list";
@@ -266,7 +274,7 @@ async function newPair(id) {
   renderUnits();
   try {
     await api(`/api/units/${id}/addpair`, { method: "POST" });
-    // 异步创建，轮询等待端口对出现（最多 40 秒）
+    // 异步创建，轮询等待端口对出现或报错（最多 40 秒）
     for (let i = 0; i < 80; i++) {
       await new Promise((res) => setTimeout(res, 500));
       const u = units.find((x) => x.id === id);
@@ -275,6 +283,12 @@ async function newPair(id) {
         creating.delete(id);
         renderUnits();
         alert(`已新建端口对：\n终端连接端 ${added.terminal}（SecureCRT 连这个）\n分线器接管端 ${added.takeover}`);
+        return;
+      }
+      if (u && u.lastError) {
+        creating.delete(id);
+        renderUnits();
+        alert("新建端口对失败：\n" + u.lastError);
         return;
       }
     }
