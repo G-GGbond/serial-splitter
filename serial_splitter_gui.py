@@ -15,6 +15,7 @@
 import ctypes
 import os
 import re
+import sys
 import subprocess
 import tempfile
 import threading
@@ -574,7 +575,17 @@ class SplitterConsole:
         self.root.destroy()
 
 
+def _high_res_timer():
+    """提高 Windows 定时器精度到 1ms，降低串口轮询/阻塞检测延迟。"""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        except Exception:
+            pass
+
+
 def main():
+    _high_res_timer()
     root = tk.Tk()
     SplitterConsole(root)
     root.mainloop()

@@ -11,9 +11,10 @@ import (
 )
 
 // Serial 封装一个串口读写。
+// go.bug.st/serial 的 Port 内部已线程安全，此处直接透传。
 type Serial struct {
 	port serial.Port
-	mu   sync.Mutex
+	mu   sync.Mutex // 仅保护 Close 与 Read/Write 的竞争
 }
 
 // Open 打开串口。
@@ -25,7 +26,8 @@ func Open(name string, baud int) (*Serial, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.SetReadTimeout(50 * time.Millisecond)
+	// 短超时：有数据立即返回，无数据最多等 5ms，保证转发低延迟
+	p.SetReadTimeout(5 * time.Millisecond)
 	return &Serial{port: p}, nil
 }
 
@@ -39,34 +41,37 @@ func (s *Serial) Close() {
 	}
 }
 
-// Read 读串口数据。
+// Read 读串口数据（阻塞，数据到达立即返回）。
 func (s *Serial) Read(p []byte) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.port == nil {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("port closed")
 	}
+	// 读取期间释放锁，避免阻塞读锁住 Write
+	s.mu.Unlock()
 	return s.port.Read(p)
 }
 
 // Write 写串口数据。
 func (s *Serial) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.port == nil {
+		s.mu.Unlock()
 		return 0, fmt.Errorf("port closed")
 	}
+	s.mu.Unlock()
 	return s.port.Write(p)
 }
 
 // Splitter 一个分线器实例。
 type Splitter struct {
-	source    *Serial
-	targets   []*Serial
-	stop      chan struct{}
-	done      chan struct{}
-	mu        sync.Mutex
-	running   bool
+	source     *Serial
+	targets    []*Serial
+	stop       chan struct{}
+	done       chan struct{}
+	mu         sync.Mutex
+	running    bool
 	sourceName string
 }
 
