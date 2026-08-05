@@ -10,9 +10,12 @@ __pycache__/
 # com0com 解压目录（安装时重新解压即可）
 com0com/
 
+# Go 编译产物
+*.exe
+
 # IDE
 .vscode/
 .idea/
 
-# Claude Code �����ļ�
+# Claude Code �����ļ�
 .claude/

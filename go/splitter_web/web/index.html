@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>串口分线器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>🔌 串口分线器</h1>
+  <div class="hint">一个源串口分出多个终端 · 双向透明转发</div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <button id="btnNew" class="btn primary">＋ 新建分线器</button>
+    <button id="btnRefresh" class="btn">⟳ 刷新端口</button>
+    <span id="globalStatus" class="status-dot idle">○ 无运行中的分线器</span>
+  </div>
+
+  <div id="units"></div>
+</main>
+
+<footer>终端用 SecureCRT / MobaXterm 连接面板中绿色标注的端口</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
