@@ -79,13 +79,14 @@ class SplitterUnit:
         self.console = console
         self.frame = frame
         self.unit_id = unit_id
-        self.pairs = []        # [(接管端口str, 终端连接端口str)]
+        self.pairs = []        # [(接管端口str, 终端连接端口str, auto)]
         self.serials = {}      # 接管端口 -> serial 对象
         self.source = None
         self.source_name = ""
         self.running = False
         self.stop_event = threading.Event()
         self.threads = []
+        self.addBtn = None
 
         self._build_ui()
 
@@ -116,7 +117,8 @@ class SplitterUnit:
         # 操作按钮
         btns = ttk.Frame(self.box)
         btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns, text="＋ 新建端口对", command=self.new_pair).pack(side="left")
+        self.addBtn = ttk.Button(btns, text="＋ 新建端口对", command=self.new_pair)
+        self.addBtn.pack(side="left")
         ttk.Button(btns, text="＋ 选已有端口", command=self.add_manual).pack(side="left", padx=(6, 0))
         ttk.Button(btns, text="刷新", command=self.console.scan_ports).pack(side="left", padx=(6, 0))
         ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=(12, 8))
@@ -128,7 +130,7 @@ class SplitterUnit:
         self.status = ttk.Label(self.box, text="○ 未启动", foreground="#888888")
         self.status.pack(fill="x", pady=(6, 0))
     # ---------- 终端行 ----------
-    def add_terminal_row(self, takeover, cnca_of):
+    def add_terminal_row(self, takeover, cnca_of, auto=False):
         row = ttk.Frame(self.term_wrap)
         row.pack(fill="x", pady=1)
         idx = len(self.pairs) + 1
@@ -137,14 +139,23 @@ class SplitterUnit:
                   foreground="#0a6a0a", font=("TkDefaultFont", 9, "bold")).pack(side="left")
         ttk.Button(row, text="移除", width=4,
                    command=lambda: self.remove_terminal(row, takeover)).pack(side="right")
-        self.pairs.append((takeover, cnca_of))
+        self.pairs.append((takeover, cnca_of, auto))
 
     def remove_terminal(self, row, takeover):
         if self.running:
             return
+        auto = False
+        for t, _a, a in self.pairs:
+            if t == takeover:
+                auto = a
+                break
         row.destroy()
-        self.pairs = [(t, a) for (t, a) in self.pairs if t != takeover]
+        self.pairs = [(t, a, auto2) for (t, a, auto2) in self.pairs if t != takeover]
         self.renumber()
+        # 自动创建的端口对：移除终端时一并清理
+        if auto:
+            self.console._remove_com0com_pair(takeover)
+            self.console.scan_ports()
 
     def renumber(self):
         for i, w in enumerate(self.term_wrap.winfo_children(), 1):
@@ -158,12 +169,34 @@ class SplitterUnit:
         if self.running:
             messagebox.showinfo("提示", "请先停止本分线器再新建端口对。")
             return
-        a_port, b_port = self.console.create_com0com_pair()
-        if not a_port:
+        # 后台线程创建端口对，避免阻塞 GUI（setupc 调用可能耗时）
+        self.addBtn.config(state="disabled")
+        self.status.config(text="⏳ 正在创建虚拟端口对…", foreground="#888888")
+
+        def _do_create():
+            try:
+                a_port, b_port = self.console.create_com0com_pair()
+            except Exception as e:
+                a_port = b_port = None
+                err = str(e)
+                self.frame.after(0, lambda: self._on_pair_created(None, None, err))
+                return
+            self.frame.after(0, lambda: self._on_pair_created(a_port, b_port, ""))
+
+        threading.Thread(target=_do_create, daemon=True).start()
+
+    def _on_pair_created(self, a_port, b_port, err):
+        self.addBtn.config(state="normal")
+        if err:
+            self.status.config(text="○ 未启动", foreground="#888888")
+            messagebox.showerror("新建失败", err)
             return
-        time.sleep(1.0)
+        if not a_port or not b_port:
+            self.status.config(text="○ 未启动", foreground="#888888")
+            return
         self.console.scan_ports()
-        self.add_terminal_row(b_port, a_port)
+        self.add_terminal_row(b_port, a_port, auto=True)
+        self.status.config(text="○ 未启动", foreground="#888888")
         messagebox.showinfo("已新建端口对",
                             f"终端连接端：{a_port}（SecureCRT/MobaXterm 连这个）\n"
                             f"分线器接管端：{b_port}（已自动接管，无需操作）")
@@ -193,7 +226,7 @@ class SplitterUnit:
                 return
             takeover = m.group(1)
             cnca = self.console.takeover_to_cnca(takeover)
-            self.add_terminal_row(takeover, cnca or "?")
+            self.add_terminal_row(takeover, cnca or "?", auto=False)
             self.console.scan_ports()
         ttk.Button(dlg, text="确定", command=ok).pack(pady=(4, 10))
 
@@ -213,7 +246,7 @@ class SplitterUnit:
         if not self.pairs:
             messagebox.showerror("错误", "请先添加终端端口（点「＋ 新建端口对」）")
             return
-        if src_name in [t for t, _ in self.pairs]:
+        if src_name in [t for t, _, _ in self.pairs]:
             messagebox.showerror("错误", "接管端口不能与源串口相同")
             return
         # 防止两个分线器用同一源
@@ -230,7 +263,7 @@ class SplitterUnit:
             return
 
         self.serials = {}
-        for takeover, _ in self.pairs:
+        for takeover, _, _ in self.pairs:
             try:
                 self.serials[takeover] = serial.Serial(takeover, baud, timeout=0.05)
             except serial.SerialException as e:
@@ -251,7 +284,7 @@ class SplitterUnit:
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.cmb_src.config(state="disabled")
-        term_ports = " / ".join(f"{a}" for _, a in self.pairs)
+        term_ports = " / ".join(f"{a}" for _, a, _ in self.pairs)
         self.status.config(
             text=f"● 运行中  {src_name} @ {baud}  → 终端端口：{term_ports}",
             foreground="#0a6a0a")
@@ -263,6 +296,10 @@ class SplitterUnit:
         self.running = False
         self.stop_event.set()
         self.close_serial()
+        # 关闭串口后 join 线程，确保彻底停止（daemon 线程也等待退出）
+        for t in self.threads:
+            t.join(timeout=1.0)
+        self.threads = []
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self.cmb_src.config(state="normal")
@@ -307,7 +344,9 @@ class SplitterUnit:
                 break
 
     def _read_vport(self, takeover):
-        vp = self.serials[takeover]
+        vp = self.serials.get(takeover)
+        if vp is None:
+            return
         while not self.stop_event.is_set():
             try:
                 n = vp.in_waiting
@@ -388,6 +427,10 @@ class SplitterConsole:
             self.units.remove(unit)
             for i, u in enumerate(self.units, 1):
                 u.box.config(text=f" 分线器 {i} ")
+            # 清理该分线器自动创建的端口对
+            for t, _a, auto in list(unit.pairs):
+                if auto:
+                    self._remove_com0com_pair(t)
             self.update_status()
 
     # ---------- 端口扫描 ----------
@@ -500,15 +543,10 @@ class SplitterConsole:
     def create_com0com_pair(self):
         setupc = find_setupc()
         if not setupc:
-            messagebox.showerror("未找到 com0com",
-                                 "未找到 com0com 驱动。\n请先安装 com0com 后再试。")
-            return None, None
+            raise RuntimeError("未找到 com0com 驱动。\n请先安装 com0com 后再试。")
         if not is_admin():
-            messagebox.showwarning(
-                "需要管理员权限",
-                "请以管理员身份运行本程序（右键 → 以管理员身份运行），\n"
-                "否则无法创建虚拟串口。")
-            return None, None
+            raise RuntimeError(
+                "需要管理员权限。\n请以管理员身份运行本程序（右键 → 以管理员身份运行）。")
 
         before = self._setupc_list_map()
         try:
@@ -534,8 +572,7 @@ class SplitterConsole:
                  "/v", "SuppressNewHWUI", "/t", "REG_DWORD", "/d", "0", "/f"],
                 creationflags=flags, capture_output=True, timeout=30)
         except Exception as e:
-            messagebox.showerror("错误", f"执行 com0com 失败：{e}")
-            return None, None
+            raise RuntimeError(f"执行 com0com 失败：{e}")
 
         # 轮询检测新端口对（避免时序竞态），最多等 25 秒
         deadline = time.time() + 25
@@ -552,15 +589,42 @@ class SplitterConsole:
                 return a_port, b_port
             time.sleep(0.6)
 
-        messagebox.showerror(
-            "新建失败",
+        raise RuntimeError(
             "未能检测到新端口对。\n\n"
             "可能原因：\n"
             "1. com0com 驱动未正确安装\n"
             "2. UAC 授权被取消\n"
-            "3. 系统端口号耗尽\n\n"
-            "详情：\n" + self._read_err(install))
-        return None, None
+            "3. 系统端口号耗尽")
+
+    @staticmethod
+    def _remove_com0com_pair(takeover):
+        """删除指定接管端口所在的 com0com 端口对。"""
+        setupc = find_setupc()
+        if not setupc:
+            return False
+        try:
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            com0dir = os.path.dirname(setupc)
+            # 反查端口对编号
+            r = subprocess.run([setupc, "list"], cwd=com0dir,
+                               capture_output=True, timeout=20, text=True)
+            idx = None
+            pat = re.compile(r"\s*(CNCA|CNCB)(\d+)\s+PortName=(?:COM#(?:,RealPortName=)?|)(COM\d+)")
+            for line in r.stdout.splitlines():
+                m = pat.match(line)
+                if not m:
+                    continue
+                kind, pair_idx, port = m.group(1), m.group(2), m.group(3)
+                if kind == "CNCB" and port == takeover:
+                    idx = pair_idx
+                    break
+            if idx is None:
+                return False
+            subprocess.run([setupc, "--silent", "remove", idx], cwd=com0dir,
+                           creationflags=flags, capture_output=True, timeout=30)
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _read_err(path):
@@ -573,23 +637,33 @@ class SplitterConsole:
     def _on_close(self):
         for u in self.units:
             u.stop()
+            # 退出时清理自动创建的端口对
+            for t, _a, auto in list(u.pairs):
+                if auto:
+                    self._remove_com0com_pair(t)
         self.root.destroy()
 
 
-def _high_res_timer():
+def _high_res_timer(on=True):
     """提高 Windows 定时器精度到 1ms，降低串口轮询/阻塞检测延迟。"""
     if sys.platform == "win32":
         try:
-            ctypes.windll.winmm.timeBeginPeriod(1)
+            if on:
+                ctypes.windll.winmm.timeBeginPeriod(1)
+            else:
+                ctypes.windll.winmm.timeEndPeriod(1)
         except Exception:
             pass
 
 
 def main():
-    _high_res_timer()
-    root = tk.Tk()
-    SplitterConsole(root)
-    root.mainloop()
+    _high_res_timer(True)
+    try:
+        root = tk.Tk()
+        SplitterConsole(root)
+        root.mainloop()
+    finally:
+        _high_res_timer(False)
 
 
 if __name__ == "__main__":

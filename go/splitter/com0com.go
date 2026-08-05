@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -180,6 +181,42 @@ func CreatePair() (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("创建端口对超时（30秒内未检测到新端口）")
+}
+
+// RemovePair 删除指定接管端口所在的 com0com 端口对。
+// 通过 setupc list 反查端口对编号，再 remove。
+func RemovePair(takeover string) error {
+	setupc := FindSetupc()
+	if setupc == "" {
+		return fmt.Errorf("未找到 com0com setupc.exe")
+	}
+	if !IsAdmin() {
+		return fmt.Errorf("需要管理员权限")
+	}
+
+	dir := filepath.Dir(setupc)
+	hide := &syscall.SysProcAttr{HideWindow: true}
+
+	// 反查接管端口对应的端口对编号（CNCB idx）
+	list := setupcList()
+	idx := -1
+	for key, dev := range list {
+		if dev == takeover && key[0].(string) == "CNCB" {
+			idx = key[1].(int)
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("未找到接管端口 %s 对应的端口对", takeover)
+	}
+
+	cmd := exec.Command(setupc, "--silent", "remove", strconv.Itoa(idx))
+	cmd.Dir = dir
+	cmd.SysProcAttr = hide
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("setupc remove 失败: %v", err)
+	}
+	return nil
 }
 
 // ListPorts 列出系统所有串口（含描述），用于区分真实串口和 com0com 虚拟串口。

@@ -54,9 +54,11 @@ function collectDrafts() {
     const baud = card.querySelector('input[type="text"]');
     if (id && sel && baud) {
       const u = units.find((x) => x.id === id);
-      // 只有未运行且用户改动过才保存
-      if (u && !u.running && !u.source) {
+      // 未运行的单元保存草稿，避免 SSE 重建丢失用户输入
+      if (u && !u.running) {
         drafts[id] = { source: sel.value, baud: baud.value };
+      } else {
+        delete drafts[id];
       }
     }
   });
@@ -137,9 +139,9 @@ function unitCard(u) {
     if (s === u.source) opt.selected = true;
     sel.appendChild(opt);
   });
-  // 优先使用用户草稿（未保存的改动）
+  // 未运行的单元优先使用用户草稿（未保存的改动）
   const draft = drafts[u.id];
-  if (draft && draft.source && !u.source) {
+  if (!u.running && draft && draft.source) {
     sel.value = draft.source;
   } else if (!u.source && sources.length > 0) {
     const real = ports.real.find((x) => x.includes("COM143")) || ports.real[0];
@@ -153,7 +155,7 @@ function unitCard(u) {
   baudField.innerHTML = '<label>波特率</label>';
   const baud = document.createElement("input");
   baud.type = "text";
-  baud.value = (draft && draft.baud && !u.source) ? draft.baud : (u.baud || 115200);
+  baud.value = (!u.running && draft && draft.baud) ? draft.baud : (u.baud || 115200);
   baud.style.width = "90px";
   baudField.appendChild(baud);
   config.appendChild(baudField);
@@ -409,7 +411,9 @@ async function refreshUnits() {
 }
 
 // ---- SSE 实时更新 ----
+let sseTimer = null;
 function connectSSE() {
+  if (sseTimer) { clearTimeout(sseTimer); sseTimer = null; }
   const es = new EventSource("/api/stream");
   es.onmessage = (ev) => {
     try {
@@ -428,7 +432,8 @@ function connectSSE() {
     }
   };
   es.onerror = () => {
-    setTimeout(connectSSE, 2000);
+    es.close(); // 关闭旧连接，避免与浏览器自动重连叠加
+    sseTimer = setTimeout(connectSSE, 2000);
   };
 }
 

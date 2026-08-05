@@ -26,8 +26,9 @@ var webFS embed.FS
 
 // Pair 端口对
 type Pair struct {
-	Takeover string `json:"takeover"` // 分线器接管端口 (CNCB)
-	Terminal string `json:"terminal"` // 终端连接端口 (CNCA)
+	Takeover    string `json:"takeover"`    // 分线器接管端口 (CNCB)
+	Terminal    string `json:"terminal"`    // 终端连接端口 (CNCA)
+	AutoCreated bool   `json:"autoCreated"` // 是否由本工具自动创建（删除分线器时清理）
 }
 
 // Unit 分线器单元
@@ -53,10 +54,9 @@ type App struct {
 func (u *Unit) snapshot() map[string]interface{} {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	pairs := u.Pairs
-	if pairs == nil {
-		pairs = []Pair{}
-	}
+	// 复制切片，避免返回别名导致并发读写竞争
+	pairs := make([]Pair, len(u.Pairs))
+	copy(pairs, u.Pairs)
 	return map[string]interface{}{
 		"id":        u.ID,
 		"source":    u.Source,
@@ -241,6 +241,13 @@ func main() {
 			// 启动中：标记停止，启动 goroutine 会检测到并释放端口
 			u.Running = false
 		}
+		// 收集该单元自动创建的端口对（删除分线器时一并清理）
+		autoTakeovers := make([]string, 0)
+		for _, p := range u.Pairs {
+			if p.AutoCreated {
+				autoTakeovers = append(autoTakeovers, p.Takeover)
+			}
+		}
 		u.mu.Unlock()
 		if sp != nil {
 			sp.Stop()
@@ -254,6 +261,16 @@ func main() {
 			}
 		}
 		app.mu.Unlock()
+		// 异步清理自动创建的端口对（不阻塞删除响应）
+		if len(autoTakeovers) > 0 {
+			go func() {
+				for _, t := range autoTakeovers {
+					if err := splitter.RemovePair(t); err != nil {
+						log.Printf("删除端口对 %s 失败: %v", t, err)
+					}
+				}
+			}()
+		}
 		app.broadcast()
 		writeJSON(w, map[string]bool{"ok": true})
 	})
@@ -369,16 +386,18 @@ func handleStart(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 			targets = append(targets, t)
 		}
 		sp := splitter.NewSplitter(src, req.Source, targets)
+		// 先启动 Run 再发布到共享状态，避免 Stop 抢在 Run 前导致的 TOCTOU
+		go sp.Run()
 		u.mu.Lock()
 		if !u.Running {
-			// 启动过程中被停止，立即释放
+			// 启动过程中被停止：Run 已在运行，Stop 已调用或即将调用，这里只需标记
 			u.mu.Unlock()
+			sp.Stop()
 			sp.Close()
 			return
 		}
 		u.splitter = sp
 		u.mu.Unlock()
-		go sp.Run()
 		app.broadcast()
 	}()
 
@@ -432,7 +451,7 @@ func handleAddPair(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 			return
 		}
 		u.mu.Lock()
-		u.Pairs = append(u.Pairs, Pair{Takeover: bPort, Terminal: aPort})
+		u.Pairs = append(u.Pairs, Pair{Takeover: bPort, Terminal: aPort, AutoCreated: true})
 		u.LastError = ""
 		u.mu.Unlock()
 		app.broadcast()
