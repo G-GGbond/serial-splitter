@@ -72,6 +72,8 @@ type Splitter struct {
 	done       chan struct{}
 	mu         sync.Mutex
 	running    bool
+	stopped    bool
+	started    bool
 	sourceName string
 }
 
@@ -91,6 +93,7 @@ func (sp *Splitter) Run() {
 	defer close(sp.done)
 	sp.mu.Lock()
 	sp.running = true
+	sp.started = true
 	sp.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -142,9 +145,24 @@ func (sp *Splitter) Run() {
 	sp.mu.Unlock()
 }
 
-// Stop 停止分线。
+// Stop 停止分线。幂等，可安全多次调用。
+// 若尚未 Run，直接返回（不阻塞）。
 func (sp *Splitter) Stop() {
+	sp.mu.Lock()
+	if sp.stopped {
+		sp.mu.Unlock()
+		if sp.started {
+			<-sp.done
+		}
+		return
+	}
+	sp.stopped = true
+	if !sp.started {
+		sp.mu.Unlock()
+		return
+	}
 	close(sp.stop)
+	sp.mu.Unlock()
 	<-sp.done
 }
 

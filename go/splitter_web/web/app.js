@@ -44,7 +44,26 @@ function updatePortStat() {
 }
 
 // ---- 渲染 ----
+// 草稿：保留用户未保存的源串口/波特率输入（避免 SSE 重建时丢失）
+const drafts = {}; // id -> {source, baud}
+
+function collectDrafts() {
+  document.querySelectorAll(".unit").forEach((card) => {
+    const id = parseInt(card.dataset.id);
+    const sel = card.querySelector('select');
+    const baud = card.querySelector('input[type="text"]');
+    if (id && sel && baud) {
+      const u = units.find((x) => x.id === id);
+      // 只有未运行且用户改动过才保存
+      if (u && !u.running && !u.source) {
+        drafts[id] = { source: sel.value, baud: baud.value };
+      }
+    }
+  });
+}
+
 function renderUnits() {
+  collectDrafts();
   const wrap = $("#units");
   wrap.innerHTML = "";
   if (units.length === 0) {
@@ -118,7 +137,11 @@ function unitCard(u) {
     if (s === u.source) opt.selected = true;
     sel.appendChild(opt);
   });
-  if (!u.source && sources.length > 0) {
+  // 优先使用用户草稿（未保存的改动）
+  const draft = drafts[u.id];
+  if (draft && draft.source && !u.source) {
+    sel.value = draft.source;
+  } else if (!u.source && sources.length > 0) {
     const real = ports.real.find((x) => x.includes("COM143")) || ports.real[0];
     if (real) sel.value = real;
   }
@@ -130,7 +153,7 @@ function unitCard(u) {
   baudField.innerHTML = '<label>波特率</label>';
   const baud = document.createElement("input");
   baud.type = "text";
-  baud.value = u.baud || 115200;
+  baud.value = (draft && draft.baud && !u.source) ? draft.baud : (u.baud || 115200);
   baud.style.width = "90px";
   baudField.appendChild(baud);
   config.appendChild(baudField);

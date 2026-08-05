@@ -475,8 +475,9 @@ class SplitterConsole:
             r = subprocess.run([setupc, "list"], cwd=os.path.dirname(setupc),
                                capture_output=True, timeout=20, text=True)
             for line in r.stdout.splitlines():
-                # 格式: CNCA0 PortName=COM#,RealPortName=COM146
-                m = re.match(r"\s*(CNCA|CNCB)(\d+)\s+PortName=COM#.*RealPortName=(COM\d+)?", line)
+                # 格式1: CNCA0 PortName=COM#,RealPortName=COM146
+                # 格式2: CNCA2 PortName=COM150
+                m = re.match(r"\s*(CNCA|CNCB)(\d+)\s+PortName=(?:COM#(?:,RealPortName=)?|)(COM\d+)", line)
                 if not m:
                     continue
                 kind, idx, port = m.group(1), int(m.group(2)), m.group(3)

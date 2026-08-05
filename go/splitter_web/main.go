@@ -237,6 +237,9 @@ func main() {
 			sp = u.splitter
 			u.splitter = nil
 			u.Running = false
+		} else if u.Running {
+			// 启动中：标记停止，启动 goroutine 会检测到并释放端口
+			u.Running = false
 		}
 		u.mu.Unlock()
 		if sp != nil {
@@ -329,7 +332,9 @@ func handleStart(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 		http.Error(w, "no pairs", 400)
 		return
 	}
-	// 预置启动参数，立即释放锁；耗时 Open 在 goroutine 中做
+	// 复制端口对（避免锁外读取数据竞争）
+	pairs := make([]Pair, len(u.Pairs))
+	copy(pairs, u.Pairs)
 	u.Source = req.Source
 	u.Baud = req.Baud
 	u.Running = true
@@ -346,10 +351,8 @@ func handleStart(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 			app.broadcast()
 			return
 		}
-		u.mu.Lock()
-		targets := make([]*splitter.Serial, 0, len(u.Pairs))
-		u.mu.Unlock()
-		for _, p := range u.Pairs {
+		targets := make([]*splitter.Serial, 0, len(pairs))
+		for _, p := range pairs {
 			t, err := splitter.Open(p.Takeover, req.Baud)
 			if err != nil {
 				src.Close()
@@ -365,10 +368,17 @@ func handleStart(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 			}
 			targets = append(targets, t)
 		}
+		sp := splitter.NewSplitter(src, req.Source, targets)
 		u.mu.Lock()
-		u.splitter = splitter.NewSplitter(src, req.Source, targets)
+		if !u.Running {
+			// 启动过程中被停止，立即释放
+			u.mu.Unlock()
+			sp.Close()
+			return
+		}
+		u.splitter = sp
 		u.mu.Unlock()
-		go u.splitter.Run()
+		go sp.Run()
 		app.broadcast()
 	}()
 
@@ -441,6 +451,11 @@ func handleAddManual(w http.ResponseWriter, r *http.Request, app *App, u *Unit) 
 		return
 	}
 	u.mu.Lock()
+	if u.Running {
+		u.mu.Unlock()
+		http.Error(w, "分线器运行中，请先停止", 400)
+		return
+	}
 	u.Pairs = append(u.Pairs, Pair{Takeover: req.Takeover, Terminal: req.Terminal})
 	u.mu.Unlock()
 	app.broadcast()
@@ -456,6 +471,11 @@ func handleDelPair(w http.ResponseWriter, r *http.Request, app *App, u *Unit) {
 		return
 	}
 	u.mu.Lock()
+	if u.Running {
+		u.mu.Unlock()
+		http.Error(w, "分线器运行中，请先停止", 400)
+		return
+	}
 	for i, p := range u.Pairs {
 		if p.Terminal == req.Terminal {
 			u.Pairs = append(u.Pairs[:i], u.Pairs[i+1:]...)
