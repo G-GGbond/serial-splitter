@@ -12,9 +12,12 @@ import (
 
 // Serial 封装一个串口读写。
 // go.bug.st/serial 的 Port 内部已线程安全，此处直接透传。
+// Write 用异步队列：未连接/阻塞的端口写入被丢弃，不阻塞广播线程。
 type Serial struct {
-	port serial.Port
-	mu   sync.Mutex // 仅保护 Close 与 Read/Write 的竞争
+	port    serial.Port
+	mu      sync.Mutex // 保护 Close 与 port 字段
+	writeCh chan []byte
+	closed  bool
 }
 
 // Open 打开串口。
@@ -28,16 +31,37 @@ func Open(name string, baud int) (*Serial, error) {
 	}
 	// 短超时：有数据立即返回，无数据最多等 5ms，保证转发低延迟
 	p.SetReadTimeout(5 * time.Millisecond)
-	return &Serial{port: p}, nil
+	s := &Serial{
+		port:    p,
+		writeCh: make(chan []byte, 128),
+	}
+	// 启动常驻写 worker：端口阻塞时数据丢弃，不阻塞调用方
+	go s.writeWorker()
+	return s, nil
+}
+
+func (s *Serial) writeWorker() {
+	for buf := range s.writeCh {
+		if s.port != nil {
+			s.port.Write(buf)
+		}
+	}
 }
 
 // Close 关闭串口。
 func (s *Serial) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.port != nil {
-		s.port.Close()
-		s.port = nil
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	close(s.writeCh)
+	p := s.port
+	s.port = nil
+	s.mu.Unlock()
+	if p != nil {
+		p.Close()
 	}
 }
 
@@ -48,20 +72,28 @@ func (s *Serial) Read(p []byte) (int, error) {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("port closed")
 	}
-	// 读取期间释放锁，避免阻塞读锁住 Write
 	s.mu.Unlock()
 	return s.port.Read(p)
 }
 
-// Write 写串口数据。
+// Write 写串口数据（异步队列，不阻塞；端口未连接时数据丢弃）。
 func (s *Serial) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	if s.port == nil {
+	if s.closed {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("port closed")
 	}
+	// 拷贝一份，避免调用方复用缓冲导致数据竞争
+	buf := make([]byte, len(p))
+	copy(buf, p)
 	s.mu.Unlock()
-	return s.port.Write(p)
+	select {
+	case s.writeCh <- buf:
+		return len(p), nil
+	default:
+		// 队列满：端口阻塞（未连接终端），丢弃数据避免拖慢广播
+		return 0, fmt.Errorf("write queue full (port maybe unconnected)")
+	}
 }
 
 // Splitter 一个分线器实例。

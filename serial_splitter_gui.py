@@ -256,7 +256,8 @@ class SplitterUnit:
                 return
 
         try:
-            self.source = serial.Serial(src_name, baud, timeout=0.05)
+            # write_timeout: 未连接终端时写接管端会阻塞，设置超时避免拖慢广播
+            self.source = serial.Serial(src_name, baud, timeout=0.05, write_timeout=0.2)
         except serial.SerialException as e:
             messagebox.showerror("错误", f"打开源串口 {src_name} 失败：\n{e}\n"
                                         f"请确认端口存在、未被其他程序占用。")
@@ -265,7 +266,7 @@ class SplitterUnit:
         self.serials = {}
         for takeover, _, _ in self.pairs:
             try:
-                self.serials[takeover] = serial.Serial(takeover, baud, timeout=0.05)
+                self.serials[takeover] = serial.Serial(takeover, baud, timeout=0.05, write_timeout=0.2)
             except serial.SerialException as e:
                 self.close_serial()
                 messagebox.showerror("错误", f"打开接管端口 {takeover} 失败：\n{e}")
